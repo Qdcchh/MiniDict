@@ -1,6 +1,6 @@
 # MiniDict
 
-A lightweight macOS Dictionary applacation written in python
+A lightweight macOS Dictionary applacation written in python,please download the ECDICT database to data/
 
 ## Goal
 

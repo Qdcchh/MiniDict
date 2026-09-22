@@ -1,0 +1,2 @@
+# macOS application activation; installs pyobjc-core automatically.
+pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
