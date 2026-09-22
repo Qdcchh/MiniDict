@@ -1,9 +1,11 @@
-"""macOS hotkey registration and activation; no keyboard monitor or polling.
+"""macOS integration: hotkey registration, activation, menu bar icon, and
+pasteboard access; nothing is monitored or polled.
 
 Carbon's C event APIs are declared with ctypes because PyObjC does not expose
 InstallEventHandler. AppKit activation uses the maintained PyObjC bridge.
 Create and close GlobalHotKey on the main thread running Tk's event loop.
 The callback must not call Tk: notify a Tcl file handler through a pipe instead.
+Menu actions take the same detour: they only write to the pipe.
 """
 
 from __future__ import annotations
@@ -167,3 +169,114 @@ def hide_application() -> None:
     from AppKit import NSApplication
 
     NSApplication.sharedApplication().hide_(None)
+
+
+def set_accessory_activation_policy() -> None:
+    """Drop the Dock icon; the menu bar item keeps MiniDict reachable."""
+    from AppKit import NSApplication, NSApplicationActivationPolicyAccessory
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyAccessory
+    )
+
+
+def restore_dock_activation_policy() -> None:
+    """Undo the accessory policy when every summon channel died."""
+    from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+
+    NSApplication.sharedApplication().setActivationPolicy_(
+        NSApplicationActivationPolicyRegular
+    )
+
+
+_STATUS_TARGET_CLASS = None
+
+
+def _status_target_class():
+    """Define the NSObject target lazily; PyObjC exists only on macOS."""
+    global _STATUS_TARGET_CLASS
+    if _STATUS_TARGET_CLASS is None:
+        from Foundation import NSObject
+
+        class MiniDictStatusTarget(NSObject):
+            """Menu actions call plain callables; Tk is reached via the pipe."""
+
+            def show_(self, sender: object) -> None:
+                self._on_show()
+
+            def quit_(self, sender: object) -> None:
+                self._on_quit()
+
+        _STATUS_TARGET_CLASS = MiniDictStatusTarget
+    return _STATUS_TARGET_CLASS
+
+
+class MenuBarIcon:
+    """The menu bar item that keeps a Dock-less MiniDict resident and reachable."""
+
+    def __init__(
+        self, on_show: Callable[[], None], on_quit: Callable[[], None]
+    ) -> None:
+        from AppKit import (
+            NSMenu,
+            NSMenuItem,
+            NSStatusBar,
+            NSVariableStatusItemLength,
+        )
+
+        # Trailing underscores become colons: show_ answers the "show:" action.
+        self._target = _status_target_class().alloc().init()
+        self._target._on_show = on_show
+        self._target._on_quit = on_quit
+
+        menu = NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "查词 MiniDict", "show:", ""
+        )
+        show_item.setTarget_(self._target)
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "退出 MiniDict", "quit:", ""
+        )
+        quit_item.setTarget_(self._target)
+        menu.addItem_(show_item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItem_(quit_item)
+
+        self._item = NSStatusBar.systemStatusBar().statusItemWithLength_(
+            NSVariableStatusItemLength
+        )
+        self._item.button().setTitle_("译")
+        self._item.setMenu_(menu)
+
+    def close(self) -> None:
+        """Remove the icon; idempotent."""
+        if getattr(self, "_item", None) is not None:
+            from AppKit import NSStatusBar
+
+            NSStatusBar.systemStatusBar().removeStatusItem_(self._item)
+            self._item = None
+
+
+def read_pasteboard_word() -> str | None:
+    """Return clipboard text worth auto-searching, or ``None``.
+
+    ECDICT stores words up to 64 characters, so longer text is ignored, and
+    only single-line text can be looked up. Best effort: an unreadable
+    pasteboard simply means there is nothing to search.
+    """
+    try:
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+
+        text = NSPasteboard.generalPasteboard().stringForType_(
+            NSPasteboardTypeString
+        )
+    except Exception:
+        # Pasteboard failures must never break summoning the window.
+        return None
+    if not text:
+        return None
+    text = text.strip()
+    if not text or len(text.splitlines()) != 1 or len(text) > 64:
+        return None
+    return text
